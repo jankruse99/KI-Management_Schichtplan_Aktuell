@@ -163,7 +163,7 @@ def is_ill(employee_id: str, day: date, illnesses: list[dict]) -> bool:
         if illness["employee_id"] != employee_id:
             continue
         start = date.fromisoformat(illness["start"])
-        end = start + timedelta(days=illness["days"] + 1)
+        end = start + timedelta(days=illness["days"])
         if start <= day < end:
             return True
     return False
@@ -215,16 +215,34 @@ def validate_plan(assignments: list[dict], staff: list[dict], start_day: date, r
     return list(dict.fromkeys(warnings))
 
 
-def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: list[dict], manual_absences: set[tuple[str, str, str]] | None = None, illnesses: list[dict] | None = None) -> tuple[list[dict], list[str]]:
+def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: list[dict], manual_absences: set[tuple[str, str, str]] | None = None, illnesses: list[dict] | None = None, baseline_plan: list[dict] | None = None) -> tuple[list[dict], list[str]]:
     absent = absent_ids(scenario, staff)
     manual_absences = manual_absences or set()
     illnesses = illnesses or []
     assignments: list[dict] = []
-    last_end: dict[str, datetime] = {}
     worked: dict[str, float] = {person["id"]: 0 for person in staff}
     night_worked: dict[str, int] = {person["id"]: 0 for person in staff}
     worked_days: dict[str, set[date]] = {person["id"]: set() for person in staff}
     warnings: list[str] = []
+
+    if baseline_plan:
+        assignments = [
+            dict(row)
+            for row in baseline_plan
+            if row["employee_id"] not in absent
+            and not is_ill(row["employee_id"], date.fromisoformat(row["date"]), illnesses)
+            and not is_within_absence_lock(
+                row["employee_id"],
+                shift_window(date.fromisoformat(row["date"]), row["shift"])[0],
+                manual_absences,
+            )
+        ]
+        for row in assignments:
+            employee_id = row["employee_id"]
+            worked[employee_id] += SHIFTS[row["shift"]][2]
+            worked_days[employee_id].add(date.fromisoformat(row["date"]))
+            if row["shift"] == "Nachtdienst":
+                night_worked[employee_id] += 1
 
     for offset in range(28):
         day = start_day + timedelta(days=offset)
@@ -232,6 +250,8 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
             start_dt, end_dt = shift_window(day, shift)
             needed = required[shift]
             for slot in range(needed):
+                if any(row["date"] == day.isoformat() and row["shift"] == shift and row["slot"] == slot + 1 for row in assignments):
+                    continue
                 candidates = []
                 assigned_this_shift = [row for row in assignments if row["date"] == day.isoformat() and row["shift"] == shift]
                 needs_shift_lead = not any(row["qualification"] == "Schichtleitung" for row in assigned_this_shift)
@@ -247,7 +267,19 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                         continue
                     if not needs_shift_lead and needs_nurse and person["qualification"] not in {"Pflegefachkraft", "Schichtleitung"}:
                         continue
-                    rest_ok = person["id"] not in last_end or start_dt - last_end[person["id"]] >= timedelta(hours=11)
+                    person_rows = sorted(
+                        [row for row in assignments if row["employee_id"] == person["id"]],
+                        key=lambda row: shift_window(date.fromisoformat(row["date"]), row["shift"])[0],
+                    )
+                    rest_ok = all(
+                        start_dt - shift_window(date.fromisoformat(row["date"]), row["shift"])[1] >= timedelta(hours=11)
+                        or shift_window(date.fromisoformat(row["date"]), row["shift"])[0] > start_dt
+                        for row in person_rows
+                    ) and all(
+                        shift_window(date.fromisoformat(row["date"]), row["shift"])[0] - end_dt >= timedelta(hours=11)
+                        or shift_window(date.fromisoformat(row["date"]), row["shift"])[1] < start_dt
+                        for row in person_rows
+                    )
                     if not rest_ok:
                         continue
                     if worked[person["id"]] + SHIFTS[shift][2] > min(48 * 4, person["hours"] * 4 * 1.10):
@@ -272,7 +304,6 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                 worked_days[person["id"]].add(day)
                 if shift == "Nachtdienst":
                     night_worked[person["id"]] += 1
-                last_end[person["id"]] = end_dt
 
     warnings.extend(validate_plan(assignments, staff, start_day, required))
     if absent:
@@ -390,7 +421,7 @@ if "illnesses" not in st.session_state:
 if "baseline_plan" not in st.session_state:
     st.session_state.baseline_plan, _ = build_plan(start_day, scenario, required, staff)
 if generate or st.session_state.get("rebuild", False) or "plan" not in st.session_state:
-    st.session_state.plan, st.session_state.warnings = build_plan(start_day, scenario, required, staff, st.session_state.manual_absences, st.session_state.illnesses)
+    st.session_state.plan, st.session_state.warnings = build_plan(start_day, scenario, required, staff, st.session_state.manual_absences, st.session_state.illnesses, st.session_state.baseline_plan)
     st.session_state.plan_meta = (start_day, scenario, selected_department)
     st.session_state.rebuild = False
 
