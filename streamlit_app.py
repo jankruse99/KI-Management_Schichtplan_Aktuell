@@ -162,10 +162,60 @@ def is_ill(employee_id: str, day: date, illnesses: list[dict]) -> bool:
         if illness["employee_id"] != employee_id:
             continue
         start = date.fromisoformat(illness["start"])
-        end = start + timedelta(days=illness["days"])
+        end = start + timedelta(days=illness["days"] + 1)
         if start <= day < end:
             return True
     return False
+
+
+def validate_plan(assignments: list[dict], staff: list[dict], start_day: date, required: dict[str, int]) -> list[str]:
+    """Prüft harte Regeln am fertigen Plan und meldet nicht abbildbare Regeln transparent."""
+    warnings = []
+    staff_by_id = {person["id"]: person for person in staff}
+    rows_by_employee: dict[str, list[dict]] = {person["id"]: [] for person in staff}
+    for row in assignments:
+        rows_by_employee[row["employee_id"]].append(row)
+
+    for employee_id, rows in rows_by_employee.items():
+        rows.sort(key=lambda row: shift_window(date.fromisoformat(row["date"]), row["shift"])[0])
+        person = staff_by_id[employee_id]
+        worked_hours = sum(SHIFTS[row["shift"]][2] for row in rows)
+        maximum = min(48 * 4, person["hours"] * 4 * 1.10)
+        if worked_hours > maximum + 0.01:
+            warnings.append(f"H-02/H-21: {employee_id} überschreitet die zulässige Arbeitszeit im Planungszeitraum.")
+        for previous, current in zip(rows, rows[1:]):
+            previous_end = shift_window(date.fromisoformat(previous["date"]), previous["shift"])[1]
+            current_start = shift_window(date.fromisoformat(current["date"]), current["shift"])[0]
+            if current_start - previous_end < timedelta(hours=11):
+                warnings.append(f"H-03: {employee_id} hat weniger als 11 Stunden Ruhezeit zwischen Diensten.")
+        work_dates = {date.fromisoformat(row["date"]) for row in rows}
+        for offset in range(22):
+            window = {start_day + timedelta(days=offset + index) for index in range(8)}
+            if len(work_dates & window) > 7:
+                warnings.append(f"H-19: {employee_id} überschreitet sieben Arbeitstage in Folge.")
+                break
+
+    for offset in range(28):
+        day = start_day + timedelta(days=offset)
+        for shift, needed in required.items():
+            rows = [row for row in assignments if row["date"] == day.isoformat() and row["shift"] == shift]
+            qualified = [row for row in rows if row["qualification"] in {"Pflegefachkraft", "Schichtleitung"}]
+            azubis = [row for row in rows if row["qualification"] == "Azubi"]
+            if len([row for row in rows if row["qualification"] != "Azubi"]) < needed:
+                warnings.append(f"H-09: {day:%d.%m.} {shift} erreicht die Mindestbesetzung ohne Azubis nicht.")
+            if not any(row["qualification"] == "Schichtleitung" for row in rows):
+                warnings.append(f"H-10: {day:%d.%m.} {shift} hat keine Schichtleitung.")
+            if not qualified:
+                warnings.append(f"H-13: {day:%d.%m.} {shift} hat keine examinierte Pflegefachkraft.")
+            if len(azubis) * 2 > len(qualified):
+                warnings.append(f"H-14: {day:%d.%m.} {shift} überschreitet den zulässigen Azubi-Anteil.")
+            if shift == "Nachtdienst" and any(not staff_by_id[row["employee_id"]]["night"] for row in rows):
+                warnings.append(f"H-15: {day:%d.%m.} enthält eine nicht nachtdienstfähige Person.")
+            if shift == "Nachtdienst":
+                warnings.append(f"H-05: {day:%d.%m.} Nachtdienst umfasst 8,25 Nettoarbeitsstunden; ein gesetzlicher Ausgleich muss dokumentiert werden.")
+    warnings.append("Nicht im 28-Tage-Fenster prüfbar: Jahreskontingent von 15 freien Sonntagen und Feiertagsausgleich.")
+    warnings.append("Nicht aus der CSV ableitbar: PpUGV-Quote nach Stationsart, Bettenzahl, Springerpool und Ersatzruhetage.")
+    return list(dict.fromkeys(warnings))
 
 
 def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: list[dict], manual_absences: set[tuple[str, str, str]] | None = None, illnesses: list[dict] | None = None) -> tuple[list[dict], list[str]]:
@@ -175,6 +225,8 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
     assignments: list[dict] = []
     last_end: dict[str, datetime] = {}
     worked: dict[str, float] = {person["id"]: 0 for person in staff}
+    night_worked: dict[str, int] = {person["id"]: 0 for person in staff}
+    worked_days: dict[str, set[date]] = {person["id"]: set() for person in staff}
     warnings: list[str] = []
 
     for offset in range(28):
@@ -201,16 +253,31 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                     rest_ok = person["id"] not in last_end or start_dt - last_end[person["id"]] >= timedelta(hours=11)
                     if not rest_ok:
                         continue
+                    if worked[person["id"]] + SHIFTS[shift][2] > min(48 * 4, person["hours"] * 4 * 1.10):
+                        continue
+                    if all(day - timedelta(days=step) in worked_days[person["id"]] for step in range(1, 8)):
+                        continue
+                    if shift == "Nachtdienst" and all(day - timedelta(days=step) in worked_days[person["id"]] and any(row["employee_id"] == person["id"] and row["date"] == (day - timedelta(days=step)).isoformat() and row["shift"] == "Nachtdienst" for row in assignments) for step in range(1, 6)):
+                        continue
+                    assigned_qualified = sum(row["qualification"] in {"Pflegefachkraft", "Schichtleitung"} for row in assigned_this_shift)
+                    assigned_azubis = sum(row["qualification"] == "Azubi" for row in assigned_this_shift)
+                    if person["qualification"] == "Azubi" and assigned_azubis * 2 >= assigned_qualified:
+                        continue
                     qualification_score = 0 if person["qualification"] in {"Pflegefachkraft", "Schichtleitung"} else 1
-                    candidates.append((qualification_score, worked[person["id"]], person["hours"], person))
+                    night_score = night_worked[person["id"]] if shift == "Nachtdienst" else 0
+                    candidates.append((qualification_score, night_score, worked[person["id"]], person["hours"], person))
                 if not candidates:
                     warnings.append(f"{day:%d.%m.}: {shift} Slot {slot + 1} konnte nicht regelkonform besetzt werden.")
                     continue
-                _, _, _, person = sorted(candidates, key=lambda candidate: candidate[:3])[0]
+                _, _, _, _, person = sorted(candidates, key=lambda candidate: candidate[:4])[0]
                 assignments.append({"date": day.isoformat(), "day": day.strftime("%a %d.%m."), "shift": shift, "employee_id": person["id"], "name": person["name"], "qualification": person["qualification"], "department": person["department"], "slot": slot + 1})
-                worked[person["id"]] += 8
+                worked[person["id"]] += SHIFTS[shift][2]
+                worked_days[person["id"]].add(day)
+                if shift == "Nachtdienst":
+                    night_worked[person["id"]] += 1
                 last_end[person["id"]] = end_dt
 
+    warnings.extend(validate_plan(assignments, staff, start_day, required))
     if absent:
         warnings.insert(0, f"Szenario aktiv: {len(absent)} Mitarbeitende sind kurzfristig abwesend. Es wurden keine Gesundheitsdaten verarbeitet.")
     if manual_absences:
@@ -218,7 +285,6 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
     if illnesses:
         warnings.insert(0, f"Krankheitsfälle berücksichtigt: {len(illnesses)} Meldung(en). Der Plan wurde für 28 Tage neu berechnet.")
     return assignments, warnings
-
 
 def as_csv(rows: list[dict]) -> str:
     output = io.StringIO()
@@ -266,7 +332,7 @@ with st.sidebar:
     start_day = st.date_input("Planwoche ab", date.today() - timedelta(days=date.today().weekday()))
     scenario = st.selectbox("Ausfallszenario", ["Keine Ausfälle", "Zwei kurzfristige Ausfälle", "Ausfallwelle"], help="Nur anonymisierte Ausfall-Slots, keine Diagnosen oder Gesundheitsdaten.")
     st.markdown("**Mindestbesetzung je Schicht**")
-    required = {shift: st.number_input(shift, min_value=1, max_value=6, value=3 if shift != "Nachtdienst" else 2, key=shift) for shift in SHIFTS}
+    required = {shift: st.number_input(shift, min_value=1, max_value=6, value={"Frühdienst": 5, "Spätdienst": 4, "Nachtdienst": 2}[shift], key=shift) for shift in SHIFTS}
     generate = st.button("Plan neu berechnen", type="primary", use_container_width=True)
 
 config_fingerprint = f"{start_day.isoformat()}|{scenario}|{required}"
