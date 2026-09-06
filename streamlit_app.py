@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import hashlib
+from html import escape
 import io
 import re
 from datetime import date, datetime, time, timedelta
@@ -295,6 +296,39 @@ def as_csv(rows: list[dict]) -> str:
     return output.getvalue()
 
 
+def render_schedule_grid(rows: list[dict], start_day: date) -> None:
+    rows_by_slot = {}
+    for row in rows:
+        rows_by_slot.setdefault((row["date"], row["shift"]), []).append(row)
+    week_tabs = st.tabs([f"Woche {week + 1}" for week in range(4)])
+    shift_classes = {"Frühdienst": "", "Spätdienst": "late", "Nachtdienst": "night"}
+    for week, week_tab in enumerate(week_tabs):
+        with week_tab:
+            week_start = start_day + timedelta(days=week * 7)
+            week_end = week_start + timedelta(days=6)
+            st.markdown(f'<div class="week-label">{week_start:%d.%m.%Y} bis {week_end:%d.%m.%Y}</div>', unsafe_allow_html=True)
+            day_columns = st.columns(7)
+            for offset, column in enumerate(day_columns):
+                day = week_start + timedelta(days=offset)
+                with column:
+                    cards = [f'<div class="schedule-day"><h4>{escape(day.strftime("%a %d.%m."))}</h4>']
+                    for shift in SHIFTS:
+                        slot_rows = rows_by_slot.get((day.isoformat(), shift), [])
+                        card_class = shift_classes[shift] if slot_rows else "open"
+                        entries = []
+                        for row in slot_rows:
+                            changed = " changed" if row.get("status") == "Ersatzbesetzung" else ""
+                            label = f'{escape(row["employee_id"])} · {escape(row["qualification"])}'
+                            if row.get("status") == "Ersatzbesetzung":
+                                label += " · Ersatz"
+                            entries.append(f'<div class="assignment{changed}">{label}</div>')
+                        if not entries:
+                            entries.append('<div class="assignment">Offener Slot</div>')
+                        cards.append(f'<div class="shift-card {card_class}"><div class="shift-name">{escape(shift)}</div>{"".join(entries)}</div>')
+                    cards.append("</div>")
+                    st.markdown("".join(cards), unsafe_allow_html=True)
+
+
 st.markdown("""<style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
 :root { --ink:#16202a; --muted:#60707c; --teal:#087f7b; --mint:#dff4ed; --coral:#e76f51; --line:#dce5e5; }
@@ -308,6 +342,16 @@ h1, h2, h3 { font-family:'Space Grotesk', sans-serif; letter-spacing:0; }
 .metric strong { display:block; font-family:'Space Grotesk'; font-size:1.75rem; }
 .metric span { color:var(--muted); font-size:.8rem; }
 .notice { background:#fff5ed; border-left:4px solid var(--coral); padding:.7rem .9rem; margin:.35rem 0; color:#713b2b; }
+.schedule-day { background:#f7faf9; border:1px solid var(--line); min-height:310px; padding:.55rem; }
+.schedule-day h4 { font-family:'Space Grotesk'; font-size:.88rem; margin:0 0 .55rem; }
+.shift-card { border-left:3px solid var(--teal); background:#fff; padding:.45rem .5rem; margin:.42rem 0; min-height:55px; }
+.shift-card.late { border-left-color:#e6a23c; }
+.shift-card.night { border-left-color:#5367a8; }
+.shift-card.open { border-left-color:var(--coral); background:#fff5ed; }
+.shift-name { color:var(--muted); font-size:.68rem; text-transform:uppercase; letter-spacing:.05em; }
+.assignment { font-size:.76rem; line-height:1.35; margin-top:.2rem; }
+.assignment.changed { color:#a94f37; font-weight:700; }
+.week-label { color:var(--teal); font-size:.78rem; text-transform:uppercase; letter-spacing:.08em; font-weight:700; margin:.5rem 0 .35rem; }
 </style>""", unsafe_allow_html=True)
 
 st.markdown('<div class="hero"><div class="eyebrow">CarePlan / Prototyp 01</div><h1>Schichtplanung, die mitdenkt.</h1><p>Regelkonforme Planung für Früh-, Spät- und Nachtdienste mit schneller Ausfallanpassung.</p></div>', unsafe_allow_html=True)
@@ -406,6 +450,9 @@ else:
 
 tab_plan, tab_staff, tab_rules = st.tabs(["Wochenplan", "Mitarbeitende", "Regeln & Annahmen"])
 with tab_plan:
+    st.markdown("#### Grafischer Einsatzplan")
+    st.caption("Teal = Frühdienst, Gold = Spätdienst, Blau = Nachtdienst, Rot = offener Slot. Orange markierte Einträge sind Ersatzbesetzungen.")
+    render_schedule_grid(display_plan, start_day)
     left, right = st.columns([4, 1])
     with left:
         view = st.selectbox("Ansicht", ["Alle Schichten", "Nur Nachtdienste", "Nur offene Slots"], label_visibility="collapsed")
