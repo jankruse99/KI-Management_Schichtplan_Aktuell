@@ -502,14 +502,49 @@ with tab_staff:
         st.caption("Abwesend in diesem Szenario: " + ", ".join(sorted(absent)))
 
 with tab_rules:
-    st.markdown("""#### Verbindliche Prüfregeln
-- **Ruhezeit:** Zwischen zwei Diensten liegen mindestens 11 Stunden.
-- **Qualifikation:** Nachtwachen werden nur Pflegefachkräften oder Schichtleitungen zugewiesen.
-- **Arbeitszeit:** Jeder Dienst umfasst 8 Stunden; die Wochenstunden aus den Stammdaten dienen als Kapazitätspriorität.
-- **Mindestbesetzung:** Früh-, Spät- und Nachtdienst werden pro Tag separat geprüft.
-- **Ausfälle:** Szenarien sind anonymisierte Verfügbarkeitsänderungen. Es werden keine individuellen Gesundheitsdaten gespeichert oder verarbeitet.
+    st.markdown("""#### Zweck und Planungszeitraum
+Der Planer erzeugt einen zusammenhängenden Dienstplan für **28 Tage bzw. vier Wochen**. Alle Dienste werden mit Zeitstempeln berechnet; insbesondere endet der Nachtdienst am Folgetag. Bei einer Krankmeldung bleibt der ursprüngliche Plan möglichst unverändert. Nur die dadurch frei gewordenen Slots werden neu besetzt.
+
+#### Schichtmodell
+- **Frühdienst:** 06:00 bis 14:12 Uhr, 7,7 Nettoarbeitsstunden.
+- **Spätdienst:** 13:30 bis 21:42 Uhr, 7,7 Nettoarbeitsstunden.
+- **Nachtdienst:** 21:00 bis 06:15 Uhr am Folgetag, 8,25 Nettoarbeitsstunden.
+- Jeder Dienst wird als ein vollständiger Schichtblock geplant. Pausen, Übergaben und gesetzliche Ausgleichszeiträume werden nicht separat modelliert.
+
+#### Harte Einsatzregeln
+- **Ruhezeit H-03:** Zwischen dem Ende eines Dienstes und dem Beginn des nächsten Dienstes müssen mindestens 11 Stunden liegen. Früh-, Spät- und Nachtdienste werden anhand ihrer tatsächlichen Uhrzeiten verglichen, nicht anhand des Datums allein.
+- **Nachtdienst H-15:** Nachtdienste werden ausschließlich an Personen mit `Nachtschicht_moeglich = wahr` vergeben. `falsch`, `FALSE`, `0` oder `nein` sperren die Person für Nachtdienste.
+- **Schichtleitung H-10:** Jede Schicht benötigt mindestens eine Person mit der Qualifikation `Schichtleitung`.
+- **Fachkraft H-13:** Jede Schicht benötigt mindestens eine `Pflegefachkraft` oder `Schichtleitung`.
+- **Mindestbesetzung H-09:** Standardmäßig werden pro Tag fünf Personen im Frühdienst, vier im Spätdienst und zwei im Nachtdienst angefordert. Die Werte können in der Seitenleiste geändert werden. Nicht besetzbare Slots werden als Prüfhinweis ausgegeben.
+- **Azubi-Regel H-14:** `Azubi` werden nicht als examinierte Fachkräfte gezählt und dürfen nicht die Mehrheit bilden. Pro Schicht wird höchstens ein Azubi je zwei qualifizierte Fachkräfte zugelassen. Die aktuelle CSV enthält kein Feld für Praxisanleitung; eine separate Praxisanleitungsprüfung findet daher nicht statt.
+- **Arbeitszeit H-02/H-21:** Pro Person gilt für die vier Wochen höchstens das kleinere Limit aus 192 Stunden und 110 Prozent der abgeleiteten Vertragsstunden. `Vollzeit` wird mit 38,5 Wochenstunden, `Teilzeit` mit 23,1 Wochenstunden angesetzt.
+- **Arbeitstage H-19:** Eine Person darf nicht an mehr als sieben aufeinanderfolgenden Kalendertagen eingeplant werden.
+- **Nachtdienstserie H-17:** Eine Person darf nicht mehr als fünf Nachtdienste in Folge erhalten.
+
+#### Auswahl und Verteilung
+- Pflegefachkräfte und Schichtleitungen werden bei der Besetzung bevorzugt, damit die Qualifikationsregeln zuerst erfüllt werden.
+- Nachtdienste werden bevorzugt an Personen mit bisher weniger Nachtdiensten vergeben.
+- Danach werden Personen mit bisher weniger Arbeitsstunden bevorzugt.
+- Bei gleicher Eignung werden die hinterlegten Vertragsstunden als Kapazitätspriorität berücksichtigt.
+- Der Planer verwendet eine transparente Heuristik und kein mathematisches Optimierungsmodell.
+
+#### Krankmeldungen und Ausfälle
+- Eine Krankmeldung benötigt Mitarbeiter-ID, Startdatum und voraussichtliche Dauer in Tagen.
+- Eine Krankmeldung über zwei Tage sperrt genau den Starttag und den folgenden Kalendertag.
+- Die erkrankte Person wird aus diesen Tagen und allen betroffenen Schichten entfernt.
+- Der Ausgangsplan bleibt für alle nicht betroffenen Personen und Slots erhalten.
+- Nur die frei gewordenen Slots werden neu besetzt. Ersatzpersonen müssen dieselben Ruhezeit-, Arbeitszeit-, Qualifikations-, Nachtdienst- und Serienregeln erfüllen.
+- Ersatzbesetzungen werden im grafischen und tabellarischen Plan als `Ersatzbesetzung` markiert.
+- Die anonymisierten Ausfallszenarien entfernen je nach Auswahl die ersten zwei oder fünf Datensätze aus der Verfügbarkeit. Das ist eine Demo-Funktion und keine reale Krankheitsverwaltung.
+- Manuelle schichtbezogene Ausfälle sperren die ausgewählte Person für den betreffenden Dienst und ein Zeitfenster von bis zu 24 Stunden.
 
 #### CSV-Stammdaten
-Die hochgeladene UTF-8-CSV benötigt exakt die Spalten `Mitarbeiter_ID`, `Qualifikation`, `Arbeitszeitmodell` und `Nachtschicht_moeglich`. Die IDs müssen ab Zeile 2 dem Muster `MA-001`, `MA-002` usw. entsprechen. Erlaubte Qualifikationen sind `Schichtleitung`, `Azubi`, `Pflegefachkraft` und `Pflegehilfskraft`; beim Arbeitszeitmodell sind `Teilzeit` und `Vollzeit` erlaubt. Für `Nachtschicht_moeglich` werden `wahr`/`falsch`, `TRUE`/`FALSE` oder `1`/`0` akzeptiert. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt.
+Die hochgeladene UTF-8-CSV benötigt die vier Spalten `Mitarbeiter_ID`, `Qualifikation`, `Arbeitszeitmodell` und `Nachtschicht_moeglich`. Die IDs müssen ab Zeile 2 fortlaufend `MA-001`, `MA-002`, `MA-003` usw. lauten. Erlaubte Qualifikationen sind `Schichtleitung`, `Azubi`, `Pflegefachkraft` und `Pflegehilfskraft`. Beim Arbeitszeitmodell sind `Teilzeit` und `Vollzeit` erlaubt. Für `Nachtschicht_moeglich` werden `wahr`/`falsch`, `TRUE`/`FALSE` oder `1`/`0` akzeptiert. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt.
 
-Die Empfehlung verteilt zuerst qualifizierte Personen und priorisiert danach die geringste bisher geplante Arbeitszeit. Das ist eine transparente Heuristik für den Prototyp und ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.""")
+Beim Import wird außerdem geprüft, dass mindestens eine Schichtleitung, mindestens zwei nachtdienstfähige Personen, eindeutige IDs und gültige Enum-Werte vorhanden sind.
+
+#### Nicht Bestandteil der aktuellen Berechnung
+Nicht separat berechnet werden Pausenblöcke, Sonn- und Feiertagskontingente, Ersatzruhetage, Urlaub, Fortbildung, Wunschfrei, Teamzugehörigkeit, PpUGV-Quoten nach Stationsart und Bettenzahl, Springerpool, Leihpersonal, Mutterschutz- oder Minderjährigen-Sonderregeln sowie eine historische Jahresarbeitszeit. Diese Informationen sind im aktuellen Vier-Spalten-CSV nicht vollständig vorhanden.
+
+Die Planung ist eine transparente technische Empfehlung. Sie ersetzt keine arbeitsrechtliche, tarifliche oder pflegefachliche Prüfung und Freigabe.""")
