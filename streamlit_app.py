@@ -4,11 +4,8 @@ import csv
 import hashlib
 from html import escape
 import io
-import re
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
 
-from openpyxl import load_workbook
 import streamlit as st
 
 
@@ -105,8 +102,9 @@ def parse_staff_csv(raw_data: bytes) -> list[dict]:
         employee_id = (normalized_row.get("Mitarbeiter_ID") or "").strip()
         if not employee_id or employee_id in seen_ids:
             raise ValueError(f"Zeile {line_number}: ID fehlt oder ist doppelt vorhanden.")
-        if not re.fullmatch(r"ma-\d{3}", employee_id):
-            raise ValueError(f"Zeile {line_number}: ID muss dem Format ma-001 entsprechen.")
+        expected_id = f"MA-{line_number - 1:03d}"
+        if employee_id != expected_id:
+            raise ValueError(f"Zeile {line_number}: erwartet wird die fortlaufende ID {expected_id}.")
         qualification = (normalized_row.get("Qualifikation") or "").strip()
         if qualification not in QUALIFICATIONS:
             raise ValueError(f"Zeile {line_number}: qualification muss eine dieser Angaben enthalten: {', '.join(sorted(QUALIFICATIONS))}.")
@@ -137,30 +135,11 @@ def parse_staff_csv(raw_data: bytes) -> list[dict]:
     return values
 
 
-def parse_staff_upload(raw_data: bytes, filename: str) -> list[dict]:
-    if Path(filename).suffix.lower() != ".xlsx":
-        return parse_staff_csv(raw_data)
-    try:
-        workbook = load_workbook(io.BytesIO(raw_data), read_only=True, data_only=True)
-        worksheet = workbook.active
-        rows = list(worksheet.iter_rows(values_only=True))
-    except Exception as error:
-        raise ValueError(f"Excel-Datei konnte nicht gelesen werden: {error}") from error
-    finally:
-        if "workbook" in locals():
-            workbook.close()
-    if not rows:
-        raise ValueError("Die Excel-Datei enthält kein Tabellenblatt mit Daten.")
-    output = io.StringIO()
-    csv.writer(output).writerows(rows)
-    return parse_staff_csv(output.getvalue().encode("utf-8"))
-
-
 def csv_template() -> str:
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS, lineterminator="\n")
     writer.writeheader()
-    writer.writerow({"Mitarbeiter_ID": "ma-001", "Qualifikation": "Pflegefachkraft", "Arbeitszeitmodell": "Vollzeit", "Nachtschicht_moeglich": "WAHR"})
+    writer.writerow({"Mitarbeiter_ID": "MA-001", "Qualifikation": "Pflegefachkraft", "Arbeitszeitmodell": "Vollzeit", "Nachtschicht_moeglich": "WAHR"})
     return output.getvalue()
 
 
@@ -379,13 +358,13 @@ st.markdown('<div class="hero"><div class="eyebrow">CarePlan / Prototyp 01</div>
 
 with st.sidebar:
     st.markdown("### Aktuelle Stammdaten")
-    uploaded_file = st.file_uploader("Mitarbeitenden-Datei hochladen", type=["csv", "xlsx"], help="CSV oder Excel (.xlsx) mit den im Tab Regeln & Annahmen beschriebenen Spalten.")
+    uploaded_file = st.file_uploader("Mitarbeitenden-CSV hochladen", type="csv", help="CSV mit den im Tab Regeln & Annahmen beschriebenen Spalten.")
     st.download_button("CSV-Vorlage herunterladen", csv_template(), "mitarbeitende_vorlage.csv", "text/csv", use_container_width=True)
     if uploaded_file is None:
         st.info("Bitte zuerst die aktuelle CSV-Datei hochladen.")
         st.stop()
     try:
-        uploaded_staff = parse_staff_upload(uploaded_file.getvalue(), uploaded_file.name)
+        uploaded_staff = parse_staff_csv(uploaded_file.getvalue())
     except (UnicodeDecodeError, ValueError) as error:
         st.error(f"CSV konnte nicht verarbeitet werden: {error}")
         st.stop()
@@ -504,6 +483,6 @@ with tab_rules:
 - **Ausfälle:** Szenarien sind anonymisierte Verfügbarkeitsänderungen. Es werden keine individuellen Gesundheitsdaten gespeichert oder verarbeitet.
 
 #### CSV-Stammdaten
-Die hochgeladene UTF-8-Datei benötigt exakt die Spalten `id`, `qualification`, `employment` und `night`. Die ID muss dem Muster `ma-001` entsprechen. Erlaubte Qualifikationen sind `Schichtleitung`, `Azubi`, `Pflegefachkraft` und `Pflegehilfskraft`; beim Arbeitszeitmodell sind `Teilzeit` und `Vollzeit` erlaubt. Für `night` werden nur `wahr` und `falsch` akzeptiert. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt.
+Die hochgeladene UTF-8-CSV benötigt exakt die Spalten `Mitarbeiter_ID`, `Qualifikation`, `Arbeitszeitmodell` und `Nachtschicht_moeglich`. Die IDs müssen ab Zeile 2 dem Muster `MA-001`, `MA-002` usw. entsprechen. Erlaubte Qualifikationen sind `Schichtleitung`, `Azubi`, `Pflegefachkraft` und `Pflegehilfskraft`; beim Arbeitszeitmodell sind `Teilzeit` und `Vollzeit` erlaubt. Für `Nachtschicht_moeglich` werden `wahr`/`falsch`, `TRUE`/`FALSE` oder `1`/`0` akzeptiert. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt.
 
 Die Empfehlung verteilt zuerst qualifizierte Personen und priorisiert danach die geringste bisher geplante Arbeitszeit. Das ist eine transparente Heuristik für den Prototyp und ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.""")
