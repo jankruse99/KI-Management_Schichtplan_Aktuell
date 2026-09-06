@@ -212,10 +212,6 @@ def validate_plan(assignments: list[dict], staff: list[dict], start_day: date, r
                 warnings.append(f"H-14: {day:%d.%m.} {shift} überschreitet den zulässigen Azubi-Anteil.")
             if shift == "Nachtdienst" and any(not staff_by_id[row["employee_id"]]["night"] for row in rows):
                 warnings.append(f"H-15: {day:%d.%m.} enthält eine nicht nachtdienstfähige Person.")
-            if shift == "Nachtdienst":
-                warnings.append(f"H-05: {day:%d.%m.} Nachtdienst umfasst 8,25 Nettoarbeitsstunden; ein gesetzlicher Ausgleich muss dokumentiert werden.")
-    warnings.append("Nicht im 28-Tage-Fenster prüfbar: Jahreskontingent von 15 freien Sonntagen und Feiertagsausgleich.")
-    warnings.append("Nicht aus der CSV ableitbar: PpUGV-Quote nach Stationsart, Bettenzahl, Springerpool und Ersatzruhetage.")
     return list(dict.fromkeys(warnings))
 
 

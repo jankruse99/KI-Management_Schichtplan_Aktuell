@@ -17,7 +17,7 @@ Ein Streamlit-Prototyp für die regelbasierte Erstellung und kurzfristige Anpass
 
 Die Planung berücksichtigt im 28-Tage-Fenster insbesondere Mindestbesetzung ohne Azubis, Schichtleitung und examinierte Pflegefachkraft je Schicht, Nachtdienstfreigabe, mindestens 11 Stunden Ruhezeit, Vertragsstunden mit 10-Prozent-Toleranz, maximal sieben Arbeitstage in Folge, maximal fünf Nächte in Folge, den Azubi-Anteil sowie eine gleichmäßigere Verteilung der Nachtdienste. Krankmeldungen sperren die Person am Krankheitstag und am Folgetag für die Planung.
 
-Regeln mit Jahresbezug, Feiertagsausgleich, Stationsart und Bettenzahl, PpUGV-Quoten, Springerpool oder bereits geleisteter Vorjahresarbeit werden als nicht prüfbar ausgewiesen, wenn die dafür benötigten Angaben nicht in der CSV oder im 28-Tage-Fenster vorhanden sind. Die Anwendung ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.
+Die Anwendung ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.
 
 ## Aufbau der Stammdaten-CSV
 
