@@ -143,21 +143,6 @@ def csv_template() -> str:
     return output.getvalue()
 
 
-def absent_ids(scenario: str, staff: list[dict]) -> set[str]:
-    count = 2 if scenario == "Zwei kurzfristige Ausfälle" else (5 if scenario == "Ausfallwelle" else 0)
-    return {person["id"] for person in staff[:count]}
-
-
-def is_within_absence_lock(employee_id: str, start_dt: datetime, manual_absences: set[tuple[str, str, str]]) -> bool:
-    for absent_employee_id, absent_date, absent_shift in manual_absences:
-        if absent_employee_id != employee_id:
-            continue
-        absent_start, _ = shift_window(date.fromisoformat(absent_date), absent_shift)
-        if absent_start <= start_dt < absent_start + timedelta(hours=24):
-            return True
-    return False
-
-
 def is_ill(employee_id: str, day: date, illnesses: list[dict]) -> bool:
     for illness in illnesses:
         if illness["employee_id"] != employee_id:
@@ -215,9 +200,7 @@ def validate_plan(assignments: list[dict], staff: list[dict], start_day: date, r
     return list(dict.fromkeys(warnings))
 
 
-def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: list[dict], manual_absences: set[tuple[str, str, str]] | None = None, illnesses: list[dict] | None = None, baseline_plan: list[dict] | None = None) -> tuple[list[dict], list[str]]:
-    absent = absent_ids(scenario, staff)
-    manual_absences = manual_absences or set()
+def build_plan(start_day: date, required: dict[str, int], staff: list[dict], illnesses: list[dict] | None = None, baseline_plan: list[dict] | None = None) -> tuple[list[dict], list[str]]:
     illnesses = illnesses or []
     assignments: list[dict] = []
     worked: dict[str, float] = {person["id"]: 0 for person in staff}
@@ -229,13 +212,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
         assignments = [
             dict(row)
             for row in baseline_plan
-            if row["employee_id"] not in absent
-            and not is_ill(row["employee_id"], date.fromisoformat(row["date"]), illnesses)
-            and not is_within_absence_lock(
-                row["employee_id"],
-                shift_window(date.fromisoformat(row["date"]), row["shift"])[0],
-                manual_absences,
-            )
+            if not is_ill(row["employee_id"], date.fromisoformat(row["date"]), illnesses)
         ]
         for row in assignments:
             employee_id = row["employee_id"]
@@ -257,7 +234,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                 needs_shift_lead = not any(row["qualification"] == "Schichtleitung" for row in assigned_this_shift)
                 needs_nurse = not any(row["qualification"] in {"Pflegefachkraft", "Schichtleitung"} for row in assigned_this_shift)
                 for person in staff:
-                    unavailable = person["id"] in absent or is_within_absence_lock(person["id"], start_dt, manual_absences) or is_ill(person["id"], day, illnesses)
+                    unavailable = is_ill(person["id"], day, illnesses)
                     already_assigned = person["id"] in {row["employee_id"] for row in assignments if row["date"] == day.isoformat() and row["shift"] == shift}
                     if unavailable or already_assigned:
                         continue
@@ -306,10 +283,6 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                     night_worked[person["id"]] += 1
 
     warnings.extend(validate_plan(assignments, staff, start_day, required))
-    if absent:
-        warnings.insert(0, f"Szenario aktiv: {len(absent)} Mitarbeitende sind kurzfristig abwesend. Es wurden keine Gesundheitsdaten verarbeitet.")
-    if manual_absences:
-        warnings.insert(0, f"Manuelle Anpassung: {len(manual_absences)} schichtbezogene Ausfalltage wurden berücksichtigt.")
     if illnesses:
         warnings.insert(0, f"Krankheitsfälle berücksichtigt: {len(illnesses)} Meldung(en). Der Plan wurde für 28 Tage neu berechnet.")
     return assignments, warnings
@@ -323,7 +296,8 @@ def as_csv(rows: list[dict]) -> str:
     return output.getvalue()
 
 
-def render_schedule_grid(rows: list[dict], start_day: date) -> None:
+def render_schedule_grid(rows: list[dict], start_day: date, changed_slot_keys: set[tuple[str, str, int]] | None = None) -> None:
+    changed_slot_keys = changed_slot_keys or set()
     rows_by_slot = {}
     for row in rows:
         rows_by_slot.setdefault((row["date"], row["shift"]), []).append(row)
@@ -341,7 +315,9 @@ def render_schedule_grid(rows: list[dict], start_day: date) -> None:
                     cards = [f'<div class="schedule-day"><h4>{escape(day.strftime("%a %d.%m."))}</h4>']
                     for shift in SHIFTS:
                         slot_rows = rows_by_slot.get((day.isoformat(), shift), [])
-                        card_class = shift_classes[shift] if slot_rows else "open"
+                        slot_key = (day.isoformat(), shift, 0)
+                        changed_slot = any(key[:2] == slot_key[:2] for key in changed_slot_keys)
+                        card_class = shift_classes[shift] if slot_rows else ("changed-open" if changed_slot else "open")
                         entries = []
                         for row in slot_rows:
                             changed = " changed" if row.get("status") == "Ersatzbesetzung" else ""
@@ -350,7 +326,7 @@ def render_schedule_grid(rows: list[dict], start_day: date) -> None:
                                 label += " · Ersatz"
                             entries.append(f'<div class="assignment{changed}">{label}</div>')
                         if not entries:
-                            entries.append('<div class="assignment">Offener Slot</div>')
+                            entries.append('<div class="assignment">Ausfall / neu zu besetzen</div>' if changed_slot else '<div class="assignment">Offener Slot</div>')
                         cards.append(f'<div class="shift-card {card_class}"><div class="shift-name">{escape(shift)}</div>{"".join(entries)}</div>')
                     cards.append("</div>")
                     st.markdown("".join(cards), unsafe_allow_html=True)
@@ -375,6 +351,7 @@ h1, h2, h3 { font-family:'Space Grotesk', sans-serif; letter-spacing:0; }
 .shift-card.late { border-left-color:#e6a23c; }
 .shift-card.night { border-left-color:#5367a8; }
 .shift-card.open { border-left-color:var(--coral); background:#fff5ed; }
+.shift-card.changed-open { border-left-color:#c6533c; background:#fff0eb; }
 .shift-name { color:var(--muted); font-size:.68rem; text-transform:uppercase; letter-spacing:.05em; }
 .assignment { font-size:.76rem; line-height:1.35; margin-top:.2rem; }
 .assignment.changed { color:#a94f37; font-weight:700; }
@@ -401,33 +378,28 @@ with st.sidebar:
 
     st.markdown("### Plan konfigurieren")
     start_day = st.date_input("Planwoche ab", date.today() - timedelta(days=date.today().weekday()))
-    scenario = st.selectbox("Ausfallszenario", ["Keine Ausfälle", "Zwei kurzfristige Ausfälle", "Ausfallwelle"], help="Nur anonymisierte Ausfall-Slots, keine Diagnosen oder Gesundheitsdaten.")
     st.markdown("**Mindestbesetzung je Schicht**")
     required = {shift: st.number_input(shift, min_value=1, max_value=6, value={"Frühdienst": 5, "Spätdienst": 4, "Nachtdienst": 2}[shift], key=shift) for shift in SHIFTS}
     generate = st.button("Plan neu berechnen", type="primary", use_container_width=True)
 
-config_fingerprint = f"{start_day.isoformat()}|{scenario}|{required}"
+config_fingerprint = f"{start_day.isoformat()}|{required}"
 dataset_key = hashlib.sha256(uploaded_file.getvalue() + config_fingerprint.encode()).hexdigest()
 if st.session_state.get("dataset_key") != dataset_key:
-    st.session_state.manual_absences = set()
     st.session_state.illnesses = []
     st.session_state.pop("plan", None)
     st.session_state.pop("baseline_plan", None)
     st.session_state.dataset_key = dataset_key
-if "manual_absences" not in st.session_state:
-    st.session_state.manual_absences = set()
 if "illnesses" not in st.session_state:
     st.session_state.illnesses = []
 if "baseline_plan" not in st.session_state:
-    st.session_state.baseline_plan, _ = build_plan(start_day, scenario, required, staff)
+    st.session_state.baseline_plan, _ = build_plan(start_day, required, staff)
 if generate or st.session_state.get("rebuild", False) or "plan" not in st.session_state:
-    st.session_state.plan, st.session_state.warnings = build_plan(start_day, scenario, required, staff, st.session_state.manual_absences, st.session_state.illnesses, st.session_state.baseline_plan)
-    st.session_state.plan_meta = (start_day, scenario, selected_department)
+    st.session_state.plan, st.session_state.warnings = build_plan(start_day, required, staff, st.session_state.illnesses, st.session_state.baseline_plan)
+    st.session_state.plan_meta = (start_day, selected_department)
     st.session_state.rebuild = False
 
 plan = st.session_state.plan
 warnings = st.session_state.warnings
-absent = absent_ids(scenario, staff)
 filled = len(plan)
 expected = sum(required.values()) * 28
 coverage = round(filled / expected * 100) if expected else 0
@@ -442,6 +414,22 @@ for row in plan:
     status = "Unverändert" if baseline_row and baseline_row["employee_id"] == row["employee_id"] else ("Ersatzbesetzung" if baseline_row else "Neu")
     display_plan.append({**row, "status": status})
 changes = [row for row in display_plan if row["status"] != "Unverändert"]
+baseline_slot_keys = set(baseline_by_slot)
+current_slot_keys = set(current_by_slot)
+changed_slot_keys = {
+    slot_key for slot_key in baseline_slot_keys | current_slot_keys
+    if baseline_by_slot.get(slot_key, {}).get("employee_id") != current_by_slot.get(slot_key, {}).get("employee_id")
+}
+hours_by_employee = {person["id"]: {"Mitarbeiter-ID": person["id"], "Arbeitszeitmodell": person["employment"], "Sollstunden (4 Wochen)": person["hours"] * 4, "Geplante Stunden": 0.0, "Abweichung": 0.0, "Nachtdienste": 0, "Ersatzeinsätze": 0} for person in staff}
+for row in plan:
+    summary = hours_by_employee[row["employee_id"]]
+    row_key = (row["date"], row["shift"], row["slot"])
+    summary["Geplante Stunden"] += SHIFTS[row["shift"]][2]
+    summary["Nachtdienste"] += row["shift"] == "Nachtdienst"
+    summary["Ersatzeinsätze"] += row_key in changed_slot_keys and baseline_by_slot.get(row_key, {}).get("employee_id") != row["employee_id"]
+for summary in hours_by_employee.values():
+    summary["Abweichung"] = round(summary["Geplante Stunden"] - summary["Sollstunden (4 Wochen)"], 2)
+hours_table = list(hours_by_employee.values())
 
 with st.sidebar.expander("Spontane Krankmeldung", expanded=True):
     st.caption("Die Person wird für die erwartete Ausfallzeit aus allen Schichten genommen. Danach wird der 28-Tage-Plan neu berechnet.")
@@ -464,7 +452,7 @@ with st.sidebar.expander("Spontane Krankmeldung", expanded=True):
             st.rerun()
 
 metric_cols = st.columns(4)
-for column, value, label in zip(metric_cols, [f"{coverage}%", filled, len(staff) - len(absent), len(warnings)], ["Besetzungsgrad", "Dienste geplant", "Verfügbar", "Prüfhinweise"]):
+for column, value, label in zip(metric_cols, [f"{coverage}%", filled, len(staff), len(warnings)], ["Besetzungsgrad", "Dienste geplant", "Verfügbar", "Prüfhinweise"]):
     column.markdown(f'<div class="metric"><strong>{value}</strong><span>{label}</span></div>', unsafe_allow_html=True)
 
 st.write("")
@@ -475,11 +463,11 @@ if warnings:
 else:
     st.success("Alle angeforderten Dienste konnten unter den hinterlegten Regeln besetzt werden.")
 
-tab_plan, tab_staff, tab_rules = st.tabs(["Wochenplan", "Mitarbeitende", "Regeln & Annahmen"])
+tab_plan, tab_hours, tab_absences, tab_staff, tab_rules = st.tabs(["Wochenplan", "Arbeitszeit", "Ausfälle & Änderungen", "Mitarbeitende", "Regeln & Annahmen"])
 with tab_plan:
     st.markdown("#### Grafischer Einsatzplan")
     st.caption("Teal = Frühdienst, Gold = Spätdienst, Blau = Nachtdienst, Rot = offener Slot. Orange markierte Einträge sind Ersatzbesetzungen.")
-    render_schedule_grid(display_plan, start_day)
+    render_schedule_grid(display_plan, start_day, changed_slot_keys)
     left, right = st.columns([4, 1])
     with left:
         view = st.selectbox("Ansicht", ["Alle Schichten", "Nur Nachtdienste", "Nur offene Slots"], label_visibility="collapsed")
@@ -495,11 +483,26 @@ with tab_plan:
         st.markdown(f"**Änderungen gegenüber dem ursprünglichen Plan: {len(changes)}**")
         st.dataframe(changes, column_config={"date": "Datum", "day": "Tag", "shift": "Dienst", "slot": "Slot", "employee_id": "Neue ID", "name": "Neue Besetzung", "qualification": "Qualifikation", "status": "Status"}, hide_index=True, use_container_width=True)
 
+with tab_hours:
+    st.markdown("#### Arbeitszeitübersicht für 28 Tage")
+    st.caption("Die Sollstunden werden aus dem Arbeitszeitmodell abgeleitet: Vollzeit 38,5 und Teilzeit 23,1 Wochenstunden.")
+    st.dataframe(hours_table, column_config={"Mitarbeiter-ID": "Mitarbeiter-ID", "Arbeitszeitmodell": "Arbeitszeitmodell", "Sollstunden (4 Wochen)": st.column_config.NumberColumn("Sollstunden (4 Wochen)", format="%.2f"), "Geplante Stunden": st.column_config.NumberColumn("Geplante Stunden", format="%.2f"), "Abweichung": st.column_config.NumberColumn("Abweichung", format="%.2f"), "Nachtdienste": "Nachtdienste", "Ersatzeinsätze": "Ersatzeinsätze"}, hide_index=True, use_container_width=True)
+
+with tab_absences:
+    st.markdown("#### Aktive Ausfälle und Planänderungen")
+    if st.session_state.illnesses:
+        illness_rows = [{"Mitarbeiter-ID": item["employee_id"], "Krank ab": item["start"], "Ausfalltage": item["days"]} for item in st.session_state.illnesses]
+        st.dataframe(illness_rows, hide_index=True, use_container_width=True)
+    else:
+        st.info("Aktuell sind keine Krankmeldungen erfasst.")
+    if changes:
+        st.markdown(f"**Geänderte Besetzungen: {len(changes)}**")
+        st.dataframe(changes, column_config={"date": "Datum", "shift": "Dienst", "slot": "Slot", "employee_id": "Neue ID", "status": "Status"}, hide_index=True, use_container_width=True)
+    else:
+        st.success("Seit dem Ausgangsplan wurden keine Besetzungen geändert.")
+
 with tab_staff:
-    available = [person for person in staff if person["id"] not in absent]
-    st.dataframe(available, column_config={"id": "ID", "name": "Mitarbeiter-ID", "qualification": "Qualifikation", "employment": "Arbeitszeitmodell", "hours": st.column_config.NumberColumn("Planstunden", format="%.0f"), "night": "Nachtdienst geeignet"}, hide_index=True, use_container_width=True)
-    if absent:
-        st.caption("Abwesend in diesem Szenario: " + ", ".join(sorted(absent)))
+    st.dataframe(staff, column_config={"id": "ID", "name": "Mitarbeiter-ID", "qualification": "Qualifikation", "employment": "Arbeitszeitmodell", "hours": st.column_config.NumberColumn("Planstunden", format="%.0f"), "night": "Nachtdienst geeignet"}, hide_index=True, use_container_width=True)
 
 with tab_rules:
     st.markdown("""#### Zweck und Planungszeitraum
