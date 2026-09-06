@@ -4,9 +4,9 @@ Ein Streamlit-Prototyp für die regelbasierte Erstellung und kurzfristige Anpass
 
 ## Funktionen
 
-- Wochenplanung für Früh-, Spät- und Nachtdienst
+- 28-Tage-Planung für Früh-, Spät- und Nachtdienst
 - Mindestbesetzung je Schicht konfigurierbar
-- Ausfallszenarien: keine Ausfälle, zwei kurzfristige Ausfälle und Ausfallwelle
+- Ausfallszenarien und spontane Krankmeldungen mit ID, Startdatum und Dauer
 - Prüfung von 11 Stunden Ruhezeit und Qualifikation im Nachtdienst
 - Prüfhinweise für offene Slots und anonymisierte Ausfälle
 - Upload aktueller Stammdaten als CSV mit festem Vier-Spalten-Schema
@@ -15,22 +15,22 @@ Ein Streamlit-Prototyp für die regelbasierte Erstellung und kurzfristige Anpass
 
 ## Aufbau der Stammdaten-CSV
 
-Die Datei muss UTF-8-kodiert sein und genau diese Kopfzeile enthalten. Komma, Semikolon oder Tabulator werden als Trennzeichen erkannt:
+Die Datei muss UTF-8-kodiert sein und diese vier Pflichtspalten enthalten. Ihre Reihenfolge ist frei wählbar. Komma, Semikolon oder Tabulator werden als Trennzeichen erkannt:
 
 ```csv
-id,qualification,employment,night
-ma-001,Pflegefachkraft,Vollzeit,wahr
-ma-002,Pflegehilfskraft,Teilzeit,falsch
+Mitarbeiter_ID,Qualifikation,Arbeitszeitmodell,Nachtschicht_moeglich
+ma-001,Pflegefachkraft,Vollzeit,WAHR
+ma-002,Pflegehilfskraft,Teilzeit,FALSCH
 ```
 
 | Spalte | Pflicht | Inhalt |
 | --- | --- | --- |
-| `id` | ja | Eindeutige Personal-ID exakt im Format `ma-001` |
-| `qualification` | ja | `Schichtleitung`, `Azubi`, `Pflegefachkraft` oder `Pflegehilfskraft` |
-| `employment` | ja | Arbeitszeitmodell: `Teilzeit` oder `Vollzeit` |
-| `night` | ja | Nachtdienst-Eignung: `wahr` oder `falsch` |
+| `Mitarbeiter_ID` | ja | Eindeutige Personal-ID, z. B. `ma-001` |
+| `Qualifikation` | ja | `Schichtleitung`, `Azubi`, `Pflegefachkraft` oder `Pflegehilfskraft` |
+| `Arbeitszeitmodell` | ja | `Teilzeit` oder `Vollzeit` |
+| `Nachtschicht_moeglich` | ja | `TRUE`/`FALSE`, `true`/`false`, `1`/`0` oder `WAHR`/`FALSCH` |
 
-Leere Pflichtfelder, doppelte IDs oder ungültige Werte werden beim Upload abgewiesen. Da das reduzierte Schema keine Namen und Abteilungen enthält, verwendet die App die Mitarbeiter-ID als Anzeige und plant den hochgeladenen Gesamtbereich. Eine passende Beispieldatei kann direkt in der Seitenleiste heruntergeladen werden.
+Leere Pflichtfelder, doppelte IDs oder ungültige Werte werden beim Upload abgewiesen. Optional akzeptiert die App `Wochenstunden`, `Vertragsstunden_Woche`, `Alter`, `Minderjaehrig`, `Ausbildungsjahr`, `Praxisanleiter`, `Urlaub_von`, `Urlaub_bis`, `Wunschfrei` und `Team`. Nach dem Upload wird ein 28-Tage-Plan erzeugt. Krankmeldungen können anschließend über Mitarbeiter-ID, Startdatum und voraussichtliche Dauer eingetragen werden; Ersatzbesetzungen werden im Plan als solche markiert.
 
 Die Planempfehlung ist eine transparente Heuristik und ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe. Es werden keine individuellen Gesundheitsdaten oder Diagnosen verarbeitet.
 
