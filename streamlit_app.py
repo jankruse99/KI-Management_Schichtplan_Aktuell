@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import io
+import re
 from datetime import date, datetime, time, timedelta
 
 import streamlit as st
@@ -67,7 +68,8 @@ def shift_window(day: date, shift: str) -> tuple[datetime, datetime]:
     return start_dt, datetime.combine(end_day, end)
 
 
-CSV_COLUMNS = ("id", "name", "qualification", "employment", "hours", "night", "department")
+CSV_COLUMNS = ("id", "qualification", "employment", "night")
+QUALIFICATIONS = {"Schichtleitung", "Azubi", "Pflegefachkraft", "Pflegehilfskraft"}
 
 
 def parse_staff_csv(raw_data: bytes) -> list[dict]:
@@ -78,6 +80,8 @@ def parse_staff_csv(raw_data: bytes) -> list[dict]:
         dialect = csv.excel
     reader = csv.DictReader(io.StringIO(text), dialect=dialect)
     columns = tuple(reader.fieldnames or ())
+    if columns != CSV_COLUMNS:
+        raise ValueError(f"Die Kopfzeile muss exakt lauten: {','.join(CSV_COLUMNS)}")
     missing = [column for column in CSV_COLUMNS if column not in columns]
     extra = [column for column in columns if column not in CSV_COLUMNS]
     if missing:
@@ -91,19 +95,25 @@ def parse_staff_csv(raw_data: bytes) -> list[dict]:
         employee_id = (row.get("id") or "").strip()
         if not employee_id or employee_id in seen_ids:
             raise ValueError(f"Zeile {line_number}: ID fehlt oder ist doppelt vorhanden.")
-        try:
-            hours = float((row.get("hours") or "").strip().replace(",", "."))
-        except ValueError as error:
-            raise ValueError(f"Zeile {line_number}: hours muss eine Zahl sein.") from error
+        if not re.fullmatch(r"ma-\d{3}", employee_id):
+            raise ValueError(f"Zeile {line_number}: ID muss dem Format ma-001 entsprechen.")
+        qualification = (row.get("qualification") or "").strip()
+        if qualification not in QUALIFICATIONS:
+            raise ValueError(f"Zeile {line_number}: qualification muss eine dieser Angaben enthalten: {', '.join(sorted(QUALIFICATIONS))}.")
+        employment = (row.get("employment") or "").strip()
+        if employment not in {"Teilzeit", "Vollzeit"}:
+            raise ValueError(f"Zeile {line_number}: employment muss Teilzeit oder Vollzeit sein.")
         night_value = (row.get("night") or "").strip().lower()
-        if night_value not in {"true", "false", "ja", "nein", "1", "0"}:
-            raise ValueError(f"Zeile {line_number}: night muss true/false oder ja/nein sein.")
+        if night_value not in {"wahr", "falsch"}:
+            raise ValueError(f"Zeile {line_number}: night muss wahr oder falsch sein.")
         person = {column: (row.get(column) or "").strip() for column in CSV_COLUMNS}
-        if any(not person[column] for column in ("name", "qualification", "employment", "department")):
+        if any(not person[column] for column in CSV_COLUMNS):
             raise ValueError(f"Zeile {line_number}: Pflichtfelder dürfen nicht leer sein.")
         person["id"] = employee_id
-        person["hours"] = hours
-        person["night"] = night_value in {"true", "ja", "1"}
+        person["name"] = employee_id
+        person["hours"] = 40 if employment == "Vollzeit" else 20
+        person["night"] = night_value == "wahr"
+        person["department"] = "Gesamtbereich"
         values.append(person)
         seen_ids.add(employee_id)
     if not values:
@@ -115,7 +125,7 @@ def csv_template() -> str:
     output = io.StringIO()
     writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS, lineterminator="\n")
     writer.writeheader()
-    writer.writerow({"id": "MA001", "name": "Max Mustermann", "qualification": "Pflegefachkraft", "employment": "Vollzeit", "hours": "38.5", "night": "true", "department": "Chirurgie"})
+    writer.writerow({"id": "ma-001", "qualification": "Pflegefachkraft", "employment": "Vollzeit", "night": "wahr"})
     return output.getvalue()
 
 
@@ -159,7 +169,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: 
                     rest_ok = person["id"] not in last_end or start_dt - last_end[person["id"]] >= timedelta(hours=11)
                     if not rest_ok:
                         continue
-                    qualification_score = 0 if person["qualification"] in {"Pflegefachkraft", "Stationsleitung"} else 1
+                    qualification_score = 0 if person["qualification"] in {"Pflegefachkraft", "Schichtleitung"} else 1
                     candidates.append((qualification_score, worked[person["id"]], person["hours"], person))
                 if not candidates:
                     warnings.append(f"{day:%d.%m.}: {shift} Slot {slot + 1} konnte nicht regelkonform besetzt werden.")
@@ -214,10 +224,9 @@ with st.sidebar:
     except (UnicodeDecodeError, ValueError) as error:
         st.error(f"CSV konnte nicht verarbeitet werden: {error}")
         st.stop()
-    departments = sorted({person["department"] for person in uploaded_staff})
-    selected_department = st.selectbox("Abteilung", departments)
-    staff = [person for person in uploaded_staff if person["department"] == selected_department]
-    st.caption(f"{len(uploaded_staff)} Mitarbeitende in {len(departments)} Abteilungen geladen.")
+    selected_department = "Gesamtbereich"
+    staff = uploaded_staff
+    st.caption(f"{len(uploaded_staff)} Mitarbeitende geladen.")
 
     st.markdown("### Plan konfigurieren")
     start_day = st.date_input("Planwoche ab", date.today() - timedelta(days=date.today().weekday()))
@@ -244,7 +253,7 @@ absent = absent_ids(scenario, staff)
 filled = len(plan)
 expected = sum(required.values()) * 7
 coverage = round(filled / expected * 100) if expected else 0
-qualified_nights = sum(row["shift"] == "Nachtdienst" and row["qualification"] in {"Pflegefachkraft", "Stationsleitung"} for row in plan)
+qualified_nights = sum(row["shift"] == "Nachtdienst" and row["qualification"] in {"Pflegefachkraft", "Schichtleitung"} for row in plan)
 
 with st.sidebar.expander("Person manuell als Ausfall markieren", expanded=True):
     st.caption("Wähle eine bereits eingeplante Person. Die Abwesenheit gilt für diesen Dienst und bis zu 5 Folgetage.")
@@ -295,23 +304,23 @@ with tab_plan:
         st.info("Offene Slots werden in den Prüfhinweisen ausgewiesen.")
     else:
         st.dataframe(shown, column_config={"date": None, "employee_id": "ID", "day": "Tag", "shift": "Dienst", "slot": "Slot", "name": "Name", "qualification": "Qualifikation", "department": "Abteilung"}, hide_index=True, use_container_width=True)
-    st.caption(f"Nachtdienste mit Pflegefachkraft/Stationsleitung: {qualified_nights} von {required['Nachtdienst'] * 7} angeforderten Slots.")
+    st.caption(f"Nachtdienste mit Pflegefachkraft/Schichtleitung: {qualified_nights} von {required['Nachtdienst'] * 7} angeforderten Slots.")
 
 with tab_staff:
     available = [person for person in staff if person["id"] not in absent]
-    st.dataframe(available, column_config={"id": "ID", "name": "Name", "qualification": "Qualifikation", "employment": "Beschäftigungsumfang", "hours": st.column_config.NumberColumn("Wochenstunden", format="%.2f"), "night": "Nachtdienst geeignet", "department": "Abteilung"}, hide_index=True, use_container_width=True)
+    st.dataframe(available, column_config={"id": "ID", "name": "Mitarbeiter-ID", "qualification": "Qualifikation", "employment": "Arbeitszeitmodell", "hours": st.column_config.NumberColumn("Planstunden", format="%.0f"), "night": "Nachtdienst geeignet"}, hide_index=True, use_container_width=True)
     if absent:
         st.caption("Abwesend in diesem Szenario: " + ", ".join(sorted(absent)))
 
 with tab_rules:
     st.markdown("""#### Verbindliche Prüfregeln
 - **Ruhezeit:** Zwischen zwei Diensten liegen mindestens 11 Stunden.
-- **Qualifikation:** Nachtwachen werden nur Pflegefachkräften oder Stationsleitungen zugewiesen.
+- **Qualifikation:** Nachtwachen werden nur Pflegefachkräften oder Schichtleitungen zugewiesen.
 - **Arbeitszeit:** Jeder Dienst umfasst 8 Stunden; die Wochenstunden aus den Stammdaten dienen als Kapazitätspriorität.
 - **Mindestbesetzung:** Früh-, Spät- und Nachtdienst werden pro Tag separat geprüft.
 - **Ausfälle:** Szenarien sind anonymisierte Verfügbarkeitsänderungen. Es werden keine individuellen Gesundheitsdaten gespeichert oder verarbeitet.
 
 #### CSV-Stammdaten
-Die hochgeladene UTF-8-Datei benötigt die Spalten `id`, `name`, `qualification`, `employment`, `hours`, `night` und `department`. `id` muss eindeutig sein; `hours` ist eine Zahl; `night` akzeptiert `true`/`false` oder `ja`/`nein`. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt. Nach dem Upload wird genau eine Abteilung ausgewählt und geplant.
+Die hochgeladene UTF-8-Datei benötigt exakt die Spalten `id`, `qualification`, `employment` und `night`. Die ID muss dem Muster `ma-001` entsprechen. Erlaubte Qualifikationen sind `Schichtleitung`, `Azubi`, `Pflegefachkraft` und `Pflegehilfskraft`; beim Arbeitszeitmodell sind `Teilzeit` und `Vollzeit` erlaubt. Für `night` werden nur `wahr` und `falsch` akzeptiert. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt.
 
 Die Empfehlung verteilt zuerst qualifizierte Personen und priorisiert danach die geringste bisher geplante Arbeitszeit. Das ist eine transparente Heuristik für den Prototyp und ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.""")
