@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import io
 from datetime import date, datetime, time, timedelta
 
@@ -66,8 +67,61 @@ def shift_window(day: date, shift: str) -> tuple[datetime, datetime]:
     return start_dt, datetime.combine(end_day, end)
 
 
-def absent_ids(scenario: str) -> set[str]:
-    return {"MA002", "MA018"} if scenario == "Zwei kurzfristige Ausfälle" else ({"MA002", "MA018", "MA025", "MA029", "MA040"} if scenario == "Ausfallwelle" else set())
+CSV_COLUMNS = ("id", "name", "qualification", "employment", "hours", "night", "department")
+
+
+def parse_staff_csv(raw_data: bytes) -> list[dict]:
+    text = raw_data.decode("utf-8-sig")
+    try:
+        dialect = csv.Sniffer().sniff(text[:4096], delimiters=",;\t")
+    except csv.Error:
+        dialect = csv.excel
+    reader = csv.DictReader(io.StringIO(text), dialect=dialect)
+    columns = tuple(reader.fieldnames or ())
+    missing = [column for column in CSV_COLUMNS if column not in columns]
+    extra = [column for column in columns if column not in CSV_COLUMNS]
+    if missing:
+        raise ValueError(f"Fehlende Spalten: {', '.join(missing)}")
+    if extra:
+        raise ValueError(f"Unbekannte Spalten: {', '.join(extra)}")
+
+    values = []
+    seen_ids = set()
+    for line_number, row in enumerate(reader, start=2):
+        employee_id = (row.get("id") or "").strip()
+        if not employee_id or employee_id in seen_ids:
+            raise ValueError(f"Zeile {line_number}: ID fehlt oder ist doppelt vorhanden.")
+        try:
+            hours = float((row.get("hours") or "").strip().replace(",", "."))
+        except ValueError as error:
+            raise ValueError(f"Zeile {line_number}: hours muss eine Zahl sein.") from error
+        night_value = (row.get("night") or "").strip().lower()
+        if night_value not in {"true", "false", "ja", "nein", "1", "0"}:
+            raise ValueError(f"Zeile {line_number}: night muss true/false oder ja/nein sein.")
+        person = {column: (row.get(column) or "").strip() for column in CSV_COLUMNS}
+        if any(not person[column] for column in ("name", "qualification", "employment", "department")):
+            raise ValueError(f"Zeile {line_number}: Pflichtfelder dürfen nicht leer sein.")
+        person["id"] = employee_id
+        person["hours"] = hours
+        person["night"] = night_value in {"true", "ja", "1"}
+        values.append(person)
+        seen_ids.add(employee_id)
+    if not values:
+        raise ValueError("Die CSV-Datei enthält keine Mitarbeitenden.")
+    return values
+
+
+def csv_template() -> str:
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=CSV_COLUMNS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerow({"id": "MA001", "name": "Max Mustermann", "qualification": "Pflegefachkraft", "employment": "Vollzeit", "hours": "38.5", "night": "true", "department": "Chirurgie"})
+    return output.getvalue()
+
+
+def absent_ids(scenario: str, staff: list[dict]) -> set[str]:
+    count = 2 if scenario == "Zwei kurzfristige Ausfälle" else (5 if scenario == "Ausfallwelle" else 0)
+    return {person["id"] for person in staff[:count]}
 
 
 def is_within_absence_lock(employee_id: str, start_dt: datetime, manual_absences: set[tuple[str, str, str]]) -> bool:
@@ -80,12 +134,12 @@ def is_within_absence_lock(employee_id: str, start_dt: datetime, manual_absences
     return False
 
 
-def build_plan(start_day: date, scenario: str, required: dict[str, int], manual_absences: set[tuple[str, str, str]] | None = None) -> tuple[list[dict], list[str]]:
-    absent = absent_ids(scenario)
+def build_plan(start_day: date, scenario: str, required: dict[str, int], staff: list[dict], manual_absences: set[tuple[str, str, str]] | None = None) -> tuple[list[dict], list[str]]:
+    absent = absent_ids(scenario, staff)
     manual_absences = manual_absences or set()
     assignments: list[dict] = []
     last_end: dict[str, datetime] = {}
-    worked: dict[str, float] = {person["id"]: 0 for person in STAFF}
+    worked: dict[str, float] = {person["id"]: 0 for person in staff}
     warnings: list[str] = []
 
     for offset in range(7):
@@ -95,7 +149,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], manual_
             needed = required[shift]
             for slot in range(needed):
                 candidates = []
-                for person in STAFF:
+                for person in staff:
                     unavailable = person["id"] in absent or is_within_absence_lock(person["id"], start_dt, manual_absences)
                     already_assigned = person["id"] in {row["employee_id"] for row in assignments if row["date"] == day.isoformat() and row["shift"] == shift}
                     if unavailable or already_assigned:
@@ -111,7 +165,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], manual_
                     warnings.append(f"{day:%d.%m.}: {shift} Slot {slot + 1} konnte nicht regelkonform besetzt werden.")
                     continue
                 _, _, _, person = sorted(candidates, key=lambda candidate: candidate[:3])[0]
-                assignments.append({"date": day.isoformat(), "day": day.strftime("%a %d.%m."), "shift": shift, "employee_id": person["id"], "name": person["name"], "qualification": person["qualification"], "slot": slot + 1})
+                assignments.append({"date": day.isoformat(), "day": day.strftime("%a %d.%m."), "shift": shift, "employee_id": person["id"], "name": person["name"], "qualification": person["qualification"], "department": person["department"], "slot": slot + 1})
                 worked[person["id"]] += 8
                 last_end[person["id"]] = end_dt
 
@@ -124,7 +178,7 @@ def build_plan(start_day: date, scenario: str, required: dict[str, int], manual_
 
 def as_csv(rows: list[dict]) -> str:
     output = io.StringIO()
-    fields = ["date", "day", "shift", "slot", "employee_id", "name", "qualification"]
+    fields = ["date", "day", "shift", "slot", "employee_id", "name", "qualification", "department"]
     writer = csv.DictWriter(output, fieldnames=fields)
     writer.writeheader()
     writer.writerows(rows)
@@ -149,6 +203,22 @@ h1, h2, h3 { font-family:'Space Grotesk', sans-serif; letter-spacing:0; }
 st.markdown('<div class="hero"><div class="eyebrow">CarePlan / Prototyp 01</div><h1>Schichtplanung, die mitdenkt.</h1><p>Regelkonforme Planung für Früh-, Spät- und Nachtdienste mit schneller Ausfallanpassung.</p></div>', unsafe_allow_html=True)
 
 with st.sidebar:
+    st.markdown("### Aktuelle Stammdaten")
+    uploaded_file = st.file_uploader("Mitarbeitenden-CSV hochladen", type="csv", help="Die Datei muss die im Tab Regeln & Annahmen beschriebenen Spalten enthalten.")
+    st.download_button("CSV-Vorlage herunterladen", csv_template(), "mitarbeitende_vorlage.csv", "text/csv", use_container_width=True)
+    if uploaded_file is None:
+        st.info("Bitte zuerst die aktuelle CSV-Datei hochladen.")
+        st.stop()
+    try:
+        uploaded_staff = parse_staff_csv(uploaded_file.getvalue())
+    except (UnicodeDecodeError, ValueError) as error:
+        st.error(f"CSV konnte nicht verarbeitet werden: {error}")
+        st.stop()
+    departments = sorted({person["department"] for person in uploaded_staff})
+    selected_department = st.selectbox("Abteilung", departments)
+    staff = [person for person in uploaded_staff if person["department"] == selected_department]
+    st.caption(f"{len(uploaded_staff)} Mitarbeitende in {len(departments)} Abteilungen geladen.")
+
     st.markdown("### Plan konfigurieren")
     start_day = st.date_input("Planwoche ab", date.today() - timedelta(days=date.today().weekday()))
     scenario = st.selectbox("Ausfallszenario", ["Keine Ausfälle", "Zwei kurzfristige Ausfälle", "Ausfallwelle"], help="Nur anonymisierte Ausfall-Slots, keine Diagnosen oder Gesundheitsdaten.")
@@ -156,16 +226,21 @@ with st.sidebar:
     required = {shift: st.number_input(shift, min_value=1, max_value=6, value=3 if shift != "Nachtdienst" else 2, key=shift) for shift in SHIFTS}
     generate = st.button("Plan neu berechnen", type="primary", use_container_width=True)
 
+dataset_key = hashlib.sha256(uploaded_file.getvalue() + selected_department.encode()).hexdigest()
+if st.session_state.get("dataset_key") != dataset_key:
+    st.session_state.manual_absences = set()
+    st.session_state.pop("plan", None)
+    st.session_state.dataset_key = dataset_key
 if "manual_absences" not in st.session_state:
     st.session_state.manual_absences = set()
 if generate or st.session_state.get("rebuild", False) or "plan" not in st.session_state:
-    st.session_state.plan, st.session_state.warnings = build_plan(start_day, scenario, required, st.session_state.manual_absences)
-    st.session_state.plan_meta = (start_day, scenario)
+    st.session_state.plan, st.session_state.warnings = build_plan(start_day, scenario, required, staff, st.session_state.manual_absences)
+    st.session_state.plan_meta = (start_day, scenario, selected_department)
     st.session_state.rebuild = False
 
 plan = st.session_state.plan
 warnings = st.session_state.warnings
-absent = absent_ids(scenario)
+absent = absent_ids(scenario, staff)
 filled = len(plan)
 expected = sum(required.values()) * 7
 coverage = round(filled / expected * 100) if expected else 0
@@ -197,7 +272,7 @@ with st.sidebar.expander("Person manuell als Ausfall markieren", expanded=True):
             st.rerun()
 
 metric_cols = st.columns(4)
-for column, value, label in zip(metric_cols, [f"{coverage}%", filled, len(STAFF) - len(absent), len(warnings)], ["Besetzungsgrad", "Dienste geplant", "Verfügbar", "Prüfhinweise"]):
+for column, value, label in zip(metric_cols, [f"{coverage}%", filled, len(staff) - len(absent), len(warnings)], ["Besetzungsgrad", "Dienste geplant", "Verfügbar", "Prüfhinweise"]):
     column.markdown(f'<div class="metric"><strong>{value}</strong><span>{label}</span></div>', unsafe_allow_html=True)
 
 st.write("")
@@ -219,12 +294,12 @@ with tab_plan:
     if view == "Nur offene Slots":
         st.info("Offene Slots werden in den Prüfhinweisen ausgewiesen.")
     else:
-        st.dataframe(shown, column_config={"date": None, "employee_id": "ID", "day": "Tag", "shift": "Dienst", "slot": "Slot", "name": "Name", "qualification": "Qualifikation"}, hide_index=True, use_container_width=True)
+        st.dataframe(shown, column_config={"date": None, "employee_id": "ID", "day": "Tag", "shift": "Dienst", "slot": "Slot", "name": "Name", "qualification": "Qualifikation", "department": "Abteilung"}, hide_index=True, use_container_width=True)
     st.caption(f"Nachtdienste mit Pflegefachkraft/Stationsleitung: {qualified_nights} von {required['Nachtdienst'] * 7} angeforderten Slots.")
 
 with tab_staff:
-    available = [person for person in STAFF if person["id"] not in absent]
-    st.dataframe(available, column_config={"id": "ID", "name": "Name", "qualification": "Qualifikation", "employment": "Beschäftigungsumfang", "hours": st.column_config.NumberColumn("Wochenstunden", format="%.2f"), "night": "Nachtdienst geeignet"}, hide_index=True, use_container_width=True)
+    available = [person for person in staff if person["id"] not in absent]
+    st.dataframe(available, column_config={"id": "ID", "name": "Name", "qualification": "Qualifikation", "employment": "Beschäftigungsumfang", "hours": st.column_config.NumberColumn("Wochenstunden", format="%.2f"), "night": "Nachtdienst geeignet", "department": "Abteilung"}, hide_index=True, use_container_width=True)
     if absent:
         st.caption("Abwesend in diesem Szenario: " + ", ".join(sorted(absent)))
 
@@ -235,5 +310,8 @@ with tab_rules:
 - **Arbeitszeit:** Jeder Dienst umfasst 8 Stunden; die Wochenstunden aus den Stammdaten dienen als Kapazitätspriorität.
 - **Mindestbesetzung:** Früh-, Spät- und Nachtdienst werden pro Tag separat geprüft.
 - **Ausfälle:** Szenarien sind anonymisierte Verfügbarkeitsänderungen. Es werden keine individuellen Gesundheitsdaten gespeichert oder verarbeitet.
+
+#### CSV-Stammdaten
+Die hochgeladene UTF-8-Datei benötigt die Spalten `id`, `name`, `qualification`, `employment`, `hours`, `night` und `department`. `id` muss eindeutig sein; `hours` ist eine Zahl; `night` akzeptiert `true`/`false` oder `ja`/`nein`. Komma, Semikolon und Tabulator werden als Trennzeichen erkannt. Nach dem Upload wird genau eine Abteilung ausgewählt und geplant.
 
 Die Empfehlung verteilt zuerst qualifizierte Personen und priorisiert danach die geringste bisher geplante Arbeitszeit. Das ist eine transparente Heuristik für den Prototyp und ersetzt keine arbeitsrechtliche oder pflegefachliche Freigabe.""")
