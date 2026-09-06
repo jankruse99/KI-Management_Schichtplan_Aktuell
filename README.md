@@ -9,7 +9,7 @@ Ein Streamlit-Prototyp für die regelbasierte Erstellung und kurzfristige Anpass
 - Ausfallszenarien und spontane Krankmeldungen mit ID, Startdatum und Dauer
 - Prüfung von 11 Stunden Ruhezeit und Qualifikation im Nachtdienst
 - Prüfhinweise für offene Slots und anonymisierte Ausfälle
-- Upload aktueller Stammdaten als CSV mit festem Vier-Spalten-Schema
+- Upload aktueller Stammdaten als CSV oder Excel-`.xlsx` mit festem Vier-Spalten-Schema
 - Manuelle, schichtbezogene Ausfalleingabe mit mehrtägiger Dauer
 - CSV-Export des erzeugten Plans
 
@@ -21,7 +21,7 @@ Regeln mit Jahresbezug, Feiertagsausgleich, Stationsart und Bettenzahl, PpUGV-Qu
 
 ## Aufbau der Stammdaten-CSV
 
-Die Datei muss UTF-8-kodiert sein und diese vier Pflichtspalten enthalten. Ihre Reihenfolge ist frei wählbar. Komma, Semikolon oder Tabulator werden als Trennzeichen erkannt:
+Die CSV-Datei muss UTF-8-kodiert sein und diese vier Pflichtspalten enthalten. Alternativ kann eine Excel-Datei im `.xlsx`-Format hochgeladen werden; dort müssen die Spalten in der ersten Tabelle in der ersten Zeile stehen. Ihre Reihenfolge ist frei wählbar. Bei CSV werden Komma, Semikolon oder Tabulator als Trennzeichen erkannt:
 
 ```csv
 Mitarbeiter_ID,Qualifikation,Arbeitszeitmodell,Nachtschicht_moeglich

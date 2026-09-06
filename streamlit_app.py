@@ -6,7 +6,9 @@ from html import escape
 import io
 import re
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
+from openpyxl import load_workbook
 import streamlit as st
 
 
@@ -133,6 +135,25 @@ def parse_staff_csv(raw_data: bytes) -> list[dict]:
     if sum(person["night"] for person in values) < 2:
         raise ValueError("Die CSV benötigt mindestens zwei nachtdienstfähige Mitarbeitende.")
     return values
+
+
+def parse_staff_upload(raw_data: bytes, filename: str) -> list[dict]:
+    if Path(filename).suffix.lower() != ".xlsx":
+        return parse_staff_csv(raw_data)
+    try:
+        workbook = load_workbook(io.BytesIO(raw_data), read_only=True, data_only=True)
+        worksheet = workbook.active
+        rows = list(worksheet.iter_rows(values_only=True))
+    except Exception as error:
+        raise ValueError(f"Excel-Datei konnte nicht gelesen werden: {error}") from error
+    finally:
+        if "workbook" in locals():
+            workbook.close()
+    if not rows:
+        raise ValueError("Die Excel-Datei enthält kein Tabellenblatt mit Daten.")
+    output = io.StringIO()
+    csv.writer(output).writerows(rows)
+    return parse_staff_csv(output.getvalue().encode("utf-8"))
 
 
 def csv_template() -> str:
@@ -358,13 +379,13 @@ st.markdown('<div class="hero"><div class="eyebrow">CarePlan / Prototyp 01</div>
 
 with st.sidebar:
     st.markdown("### Aktuelle Stammdaten")
-    uploaded_file = st.file_uploader("Mitarbeitenden-CSV hochladen", type="csv", help="Die Datei muss die im Tab Regeln & Annahmen beschriebenen Spalten enthalten.")
+    uploaded_file = st.file_uploader("Mitarbeitenden-Datei hochladen", type=["csv", "xlsx"], help="CSV oder Excel (.xlsx) mit den im Tab Regeln & Annahmen beschriebenen Spalten.")
     st.download_button("CSV-Vorlage herunterladen", csv_template(), "mitarbeitende_vorlage.csv", "text/csv", use_container_width=True)
     if uploaded_file is None:
         st.info("Bitte zuerst die aktuelle CSV-Datei hochladen.")
         st.stop()
     try:
-        uploaded_staff = parse_staff_csv(uploaded_file.getvalue())
+        uploaded_staff = parse_staff_upload(uploaded_file.getvalue(), uploaded_file.name)
     except (UnicodeDecodeError, ValueError) as error:
         st.error(f"CSV konnte nicht verarbeitet werden: {error}")
         st.stop()
